@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CFG Validator</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            line-height: 1.6;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        select, textarea, button {
+            width: 100%;
+            margin: 10px 0;
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #3574db;
+        }
+        button:disabled {
+            background-color: #ccc;
+        }
+        .error {
+            color: red;
+            padding: 10px;
+            margin: 10px 0;
+            background-color: #fff3f3;
+            border-radius: 4px;
+        }
+        .results {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+        .loading {
+            opacity: 0.7;
+        }
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        .comparison-table th, .comparison-table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        .comparison-table th {
+            background-color: #f4f4f4;
+        }
+        .match {
+            background-color: #e6ffe6;
+        }
+        .mismatch {
+            background-color: #ffe6e6;
+        }
+        #aiResponse {
+            white-space: pre-wrap;
+            background-color: #f8f9fa;
+            padding: 10px;
+            margin-top: 10px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+    </style>
+</head>
+<body>
+    <h1>CFG Validator</h1>
+    <div id="app">
+        <select id="productionType">
+            <option value="arithmetic">Arithmetic Expressions</option>
+        </select>
+        
+        <textarea id="codeInput" rows="5" placeholder="Enter your code snippets (one per line)"></textarea>
+        
+        <button id="validateButton">Validate CFG</button>
+        
+        <div id="results" class="results" style="display: none;"></div>
+        <div id="aiResponse" style="display: none;"></div>
+    </div>
+
+    <script>
+        const HARDCODED_CFG = {
+            arithmetic: {
+                productions: [
+                    { left: "expr", right: ["expr + term", "expr - term", "term"] },
+                    { left: "term", right: ["term * factor", "term / factor", "factor"] },
+                    { left: "factor", right: ["( expr )", "number", "identifier"] }
+                ]
+            }
+        };
+
+
+        const CONFIG = {
+            API_URL_POST: "https://api.edenai.run/v2/workflow/48116924-110e-42e0-81bd-eec91f45ec92/execution/",
+            API_URL_GET_TEMPLATE: "https://api.edenai.run/v2/workflow/48116924-110e-42e0-81bd-eec91f45ec92/execution/{id}/",
+            BEARER_TOKEN: "Bearer <Bearer token>",
+            POLLING_INTERVAL: 5000
+        };
+
+        class CFGValidationSystem {
+            constructor() {
+                this.preloadedCFG = null;
+                this.aiGeneratedCFG = null;
+            }
+
+            async loadPreloadedCFG(productionType) {
+                this.preloadedCFG = HARDCODED_CFG[productionType.toLowerCase()];
+                return true;
+            }
+
+            generatePrompt(productionType, codeSnippet) {
+                return `Generate Context-Free Grammar (CFG) production rules for ${productionType} 
+                that can validate the following code snippet(s): 
+                
+                ${codeSnippet}
+                
+                You must follow these rules strictly:
+                1. Use only the non-terminals: expr, term, factor
+                2. Follow exact format shown in the JSON structure below
+                3. Match the hardcoded grammar structure
+                
+                Return response in exactly this JSON format:
+                {
+                    "productions": [
+                        {
+                            "left": "expr",
+                            "right": ["expr + term", "expr - term", "term"]
+                        },
+                        {
+                            "left": "term",
+                            "right": ["term * factor", "term / factor", "factor"]
+                        },
+                        {
+                            "left": "factor",
+                            "right": ["( expr )", "number", "identifier"]
+                        }
+                    ]
+                }`;
+            }
+
+            async fetchAIResponse(prompt) {
+                try {
+                    // Initial POST request
+                    const postResponse = await fetch(CONFIG.API_URL_POST, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': CONFIG.BEARER_TOKEN
+                        },
+                        body: JSON.stringify({ prompt })
+                    });
+                    
+                    if (!postResponse.ok) {
+                        throw new Error(`HTTP error! status: ${postResponse.status}`);
+                    }
+                    
+                    const postResult = await postResponse.json();
+                    if (!postResult.id) {
+                        throw new Error('No execution ID received');
+                    }
+
+                    // Poll for results
+                    const getUrl = CONFIG.API_URL_GET_TEMPLATE.replace('{id}', postResult.id);
+                    let status = 'running';
+                    let attempts = 0;
+                    const maxAttempts = 10;
+                    
+                    while (status === 'running' && attempts < maxAttempts) {
+                        await new Promise(resolve => setTimeout(resolve, CONFIG.POLLING_INTERVAL));
+                        
+                        const getResponse = await fetch(getUrl, {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': CONFIG.BEARER_TOKEN
+                            }
+                        });
+                        
+                        if (!getResponse.ok) {
+                            throw new Error(`HTTP error! status: ${getResponse.status}`);
+                        }
+                        
+                        const getResult = await getResponse.json();
+                        status = getResult.content.status;
+                        
+                        if (status === 'success') {
+                            const generatedText = getResult.content?.results?.output?.results?.[0]?.generated_text;
+                            // Display raw AI response
+                            document.getElementById('aiResponse').textContent = generatedText;
+                            document.getElementById('aiResponse').style.display = 'block';
+                            return this.parseAIResponse(generatedText);
+                        }
+                        
+                        if (status === 'failed') {
+                            throw new Error('AI execution failed');
+                        }
+                        
+                        attempts++;
+                    }
+                    
+                    if (attempts >= maxAttempts) {
+                        throw new Error('Timeout waiting for AI response');
+                    }
+                } catch (error) {
+                    console.error('Error in fetchAIResponse:', error);
+                    throw error;
+                }
+            }
+
+            parseAIResponse(response) {
+                try {
+                    if (typeof response === 'string') {
+                        // Try to find JSON object in the response
+                        const jsonMatch = response.match(/\{[\s\S]*\}/);
+                        if (jsonMatch) {
+                            return JSON.parse(jsonMatch[0]);
+                        }
+                        throw new Error('No valid JSON found in response');
+                    }
+                    return response;
+                } catch (error) {
+                    console.error('Error parsing AI response:', error);
+                    throw new Error('Failed to parse AI response: ' + error.message);
+                }
+            }
+
+            compareCFGs() {
+                const comparison = {
+                    matches: 0,
+                    mismatches: 0,
+                    details: []
+                };
+
+                try {
+                    const preloaded = this.preloadedCFG.productions;
+                    const generated = this.aiGeneratedCFG.productions;
+
+                    for (let i = 0; i < preloaded.length; i++) {
+                        const preloadedRule = preloaded[i];
+                        const generatedRule = generated.find(r => r.left === preloadedRule.left);
+
+                        if (!generatedRule) {
+                            comparison.mismatches++;
+                            comparison.details.push({
+                                type: 'missing',
+                                expected: preloadedRule,
+                                actual: null
+                            });
+                            continue;
+                        }
+
+                        // Compare right-hand sides
+                        const rightMatches = preloadedRule.right.every(r => 
+                            generatedRule.right.includes(r));
+
+                        if (rightMatches) {
+                            comparison.matches++;
+                            comparison.details.push({
+                                type: 'match',
+                                rule: preloadedRule
+                            });
+                        } else {
+                            comparison.mismatches++;
+                            comparison.details.push({
+                                type: 'mismatch',
+                                expected: preloadedRule,
+                                actual: generatedRule
+                            });
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error in compareCFGs:', error);
+                    comparison.error = error.message;
+                }
+
+                return comparison;
+            }
+
+            validateSyntax(codeSnippet) {
+                const lines = codeSnippet.split('\n').filter(line => line.trim());
+                const validationResults = lines.map((line, index) => {
+                    try {
+                        const tokens = this.tokenize(line.trim());
+                        const result = this.validateTokens(tokens);
+                        return {
+                            line: line.trim(),
+                            lineNumber: index + 1,
+                            isValid: result.isValid,
+                            error: result.error
+                        };
+                    } catch (error) {
+                        return {
+                            line: line.trim(),
+                            lineNumber: index + 1,
+                            isValid: false,
+                            error: 'Invalid syntax'
+                        };
+                    }
+                });
+                return validationResults;
+            }
+
+            tokenize(codeSnippet) {
+                const tokenized = expression
+                    .replace(/([+\-*/()=])/g, ' $1 ')
+                    .trim()
+                    .split(/\s+/)
+                    .filter(token => token.length > 0);
+                return tokenized;
+            }
+
+            validateTokens(tokens) {
+                // Check for basic syntax errors
+                let result = { isValid: true, error: null };
+
+                // Check for empty expression
+                if (tokens.length === 0) {
+                    return { isValid: false, error: 'Empty expression' };
+                }
+
+                // Check for consecutive operators
+                for (let i = 0; i < tokens.length - 1; i++) {
+                    if (this.isOperator(tokens[i]) && this.isOperator(tokens[i + 1])) {
+                        return { 
+                            isValid: false, 
+                            error: `Consecutive operators found: ${tokens[i]} ${tokens[i + 1]}` 
+                        };
+                    }
+                }
+
+                // Check for balanced parentheses
+                let parenCount = 0;
+                for (const token of tokens) {
+                    if (token === '(') parenCount++;
+                    if (token === ')') parenCount--;
+                    if (parenCount < 0) {
+                        return { isValid: false, error: 'Unmatched closing parenthesis' };
+                    }
+                }
+                if (parenCount > 0) {
+                    return { isValid: false, error: 'Unclosed parenthesis' };
+                }
+
+                // Check for valid operator placement
+                if (this.isOperator(tokens[0]) && tokens[0] !== '(') {
+                    return { isValid: false, error: 'Expression cannot start with an operator' };
+                }
+                if (this.isOperator(tokens[tokens.length - 1]) && tokens[tokens.length - 1] !== ')') {
+                    return { isValid: false, error: 'Expression cannot end with an operator' };
+                }
+
+                return result;
+            }
+
+            isOperator(token) {
+                return ['+', '-', '*', '/', '='].includes(token);
+            }
+        }
+
+        // UI Event Handlers
+        document.getElementById('validateButton').addEventListener('click', async () => {
+            const productionType = document.getElementById('productionType').value;
+            const codeSnippet = document.getElementById('codeInput').value;
+            const resultsDiv = document.getElementById('results');
+            const validateButton = document.getElementById('validateButton');
+            const aiResponseDiv = document.getElementById('aiResponse');
+
+            if (!codeSnippet) {
+                alert('Please enter some code snippets');
+                return;
+            }
+
+            validateButton.disabled = true;
+            validateButton.textContent = 'Processing...';
+            resultsDiv.style.display = 'none';
+            aiResponseDiv.style.display = 'none';
+
+            try {
+                const validator = new CFGValidationSystem();
+                await validator.loadPreloadedCFG(productionType);
+
+                // Validate syntax first
+                const syntaxValidation = validator.validateSyntax(codeSnippet);
+                const hasErrors = syntaxValidation.some(result => !result.isValid);
+
+                let html = '<h2>Validation Results</h2>';
+                
+                // Show syntax validation results
+                html += `
+                    <h3>Syntax Validation</h3>
+                    <table class="comparison-table">
+                        <tr>
+                            <th>Line</th>
+                            <th>Expression</th>
+                            <th>Status</th>
+                            <th>Details</th>
+                        </tr>
+                `;
+
+                syntaxValidation.forEach(result => {
+                    html += `
+                        <tr class="${result.isValid ? 'match' : 'mismatch'}">
+                            <td>${result.lineNumber}</td>
+                            <td>${result.line}</td>
+                            <td>${result.isValid ? 'Valid' : 'Invalid'}</td>
+                            <td>${result.error || ''}</td>
+                        </tr>
+                    `;
+                });
+
+                html += '</table>';
+
+                if (hasErrors) {
+                    html += '<div class="error">Please fix syntax errors before proceeding with CFG validation.</div>';
+                } else {
+                    // Proceed with CFG validation
+                    const prompt = validator.generatePrompt(productionType, codeSnippet);
+                    validator.aiGeneratedCFG = await validator.fetchAIResponse(prompt);
+                    const comparison = validator.compareCFGs();
+
+                    // Add CFG comparison results
+                    html += `
+                        <h3>CFG Comparison</h3>
+                        <p>Matches: ${comparison.matches}</p>
+                        <p>Mismatches: ${comparison.mismatches}</p>
+                        <table class="comparison-table">
+                            <tr>
+                                <th>Rule Type</th>
+                                <th>Expected (Hardcoded)</th>
+                                <th>Actual (AI Generated)</th>
+                                <th>Status</th>
+                            </tr>
+                    `;
+
+                    comparison.details.forEach(detail => {
+                        const actualRules = detail.actual ? detail.actual.right.join(' | ') : 'Missing';
+                        html += `
+                            <tr class="${detail.type === 'match' ? 'match' : 'mismatch'}">
+                                <td>${detail.rule ? detail.rule.left : detail.expected.left}</td>
+                                <td>${detail.rule ? detail.rule.right.join(' | ') : detail.expected.right.join(' | ')}</td>
+                                <td>${actualRules}</td>
+                                <td>${detail.type}</td>
+                            </tr>
+                        `;
+                    });
+
+                    html += '</table>';
+                }
+
+                resultsDiv.innerHTML = html;
+                resultsDiv.style.display = 'block';
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+                resultsDiv.style.display = 'block';
+            } finally {
+                validateButton.disabled = false;
+                validateButton.textContent = 'Validate CFG';
+            }
+        });
+    </script>
+</body>
+</html>
